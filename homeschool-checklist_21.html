@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Homeschool Checklist</title>
+<link href="https://fonts.googleapis.com/css2?family=Bree+Serif&family=Overpass:wght@400;600;700;800&display=swap" rel="stylesheet">
+<script>
+  window.addEventListener('load', function() {
+  const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwcJpwEKjcbKqgj82-35-3Xjq9VlSN8OndcinK8yYftzGJZtPk9Fo7lQsTg3HfhagMaGQ/exec';
+
+  firebase.initializeApp({ databaseURL: "https://homeschool-checklist-default-rtdb.firebaseio.com" });
+  const db = firebase.database();
+
+  const DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday'];
+
+  const SUBJECTS = {
+    '8th Grade': [
+      { id:'bible8',  name:'Bible',             color:'#BF9000', sheetTab: null },
+      { id:'lit8',    name:'Literature 8',      color:'#FFC000', sheetTab: null },
+      { id:'vocab8',  name:'Vocabulary 8',      color:'#548235', sheetTab: null },
+      { id:'gram8',   name:'Grammar 8',         color:'#00ACA8', sheetTab: null },
+      { id:'earth8',  name:'Earth Science',     color:'#603391', sheetTab: 'Earth Science' },
+      { id:'amrep8',  name:'American Republic', color:'#CC0066', sheetTab: 'American Republic' },
+      { id:'prealg8', name:'Pre-Algebra',       color:'#C00000', sheetTab: null },
+    ],
+    '10th Grade': [
+      { id:'bible10', name:'Bible',             color:'#BF9000', sheetTab: null },
+      { id:'eng10',   name:'English 10',        color:'#FFC000', sheetTab: null },
+      { id:'phys10',  name:'Physical Science',  color:'#603391', sheetTab: 'Physical Science' },
+      { id:'whist10', name:'World History',     color:'#CC0066', sheetTab: 'World History' },
+      { id:'geo10',   name:'Geometry',          color:'#C00000', sheetTab: null },
+      { id:'span10',  name:'Spanish',           color:'#548235', sheetTab: null },
+      { id:'guit10',  name:'Guitar',            color:'#00ACA8', sheetTab: null },
+    ]
+  };
+
+  const STUDENTS = ['8th Grade', '10th Grade'];
+  const WEEKLY_PLANNER_GRADES = ['10th Grade'];
+
+  let currentStudent = STUDENTS[0];
+  let currentDay = getTodayIndex();
+  let adminGrade = '8th Grade';
+  let appData = {};
+  let sheetCache = {};
+  let currentWeekNumber = 29;
+
+  function getTodayIndex() {
+    const d = new Date().getDay();
+    if (d === 0 || d === 6) return 0;
+    return d - 1;
+  }
+
+  function getDayDate(dayIdx) {
+    const today = new Date();
+    const todayDow = today.getDay();
+    const mondayOffset = todayDow === 0 ? -6 : 1 - todayDow;
+    const monday = new Date(today);
+    monday.setDate(today.getDate() + mondayOffset);
+    const target = new Date(monday);
+    target.setDate(monday.getDate() + dayIdx);
+    return target.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  }
+
+  function safeKey(str) { return String(str).replace(/[.#$\[\]\s]/g, '_'); }
+  function getWeekNumber() { return appData['meta/weekNumber'] || currentWeekNumber; }
+  function isWeeklyPlanner(grade) { return WEEKLY_PLANNER_GRADES.includes(grade); }
+  function getTodayDate() { return new Date().toLocaleDateString('en-US'); }
+
+  function callAPI(params) {
+    const url = APPS_SCRIPT_URL + '?' + Object.entries(params).map(([k,v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+    return fetch(url).then(r => r.json()).catch(err => ({ error: err.message }));
+  }
+
+  function getWeekItemsFromSheet(grade, subjectTab, week) {
+    const cacheKey = `${grade}:${subjectTab}:${week}`;
+    if (sheetCache[cacheKey]) return Promise.resolve(sheetCache[cacheKey]);
+    return callAPI({ action: 'getWeekItems', grade, subject: subjectTab, week })
+      .then(data => { if (data.items) sheetCache[cacheKey] = data.items; return data.items || []; });
+  }
+
+  function markSheetComplete(grade, subjectTab, row, completed) {
+    const action = completed ? 'markComplete' : 'markIncomplete';
+    const params = { action, grade, subject: subjectTab, row };
+    if (completed) params.date = getTodayDate();
+    Object.keys(sheetCache).forEach(k => { if (k.startsWith(`${grade}:${subjectTab}:`)) delete sheetCache[k]; });
+    return callAPI(params);
+  }
+
+  function checkPath(student, dayIdx, subjectId, taskIdx) {
+    return `checks/${safeKey(student)}/${dayIdx}/${safeKey(subjectId)}/${taskIdx}`;
+  }
+
+  function getChecked(student, dayIdx, subjectId, taskIdx) {
+    return appData[checkPath(student, dayIdx, subjectId, taskIdx)] === true;
+  }
+
+  function setCheckedFb(student, dayIdx, subjectId, taskIdx, val) {
+    const key = checkPath(student, dayIdx, subjectId, taskIdx);
+    appData[key] = val;
+    db.ref(key).set(val);
+  }
+
+  function getSheetChecked(student, subjectId, row) {
+    return appData[`sheetChecks/${safeKey(student)}/${safeKey(subjectId)}/${row}`] === true;
+  }
+
+  function setSheetChecked(student, subjectId, row, val) {
+    const key = `sheetChecks/${safeKey(student)}/${safeKey(subjectId)}/${row}`;
+    appData[key] = val;
+    db.ref(key).set(val);
+  }
+
+  function getTasks(grade, subjectId, dayIdx) {
+    const path = `tasks/${safeKey(grade)}/${safeKey(subjectId)}/${dayIdx}`;
+    const val = appData[path];
+    if (!val) return ['Complete assigned work', 'Review notes'];
+    if (typeof val === 'string') {
+      const parts = val.split('||').map(s => s.trim()).filter(s => s.length > 0);
+      return parts.length > 0 ? parts : ['Complete assigned work', 'Review notes'];
+    }
+    const subjectPath = `tasks/${safeKey(grade)}/${safeKey(subjectId)}`;
+    const subjectVal = appData[subjectPath];
+    if (Array.isArray(subjectVal) && subjectVal[dayIdx] !== undefined) {
+      const dayVal = subjectVal[dayIdx];
+      if (typeof dayVal === 'string' && dayVal.length > 0) {
+        const parts = dayVal.split('||').map(s => s.trim()).filter(s => s.length > 0);
+        return parts.length > 0 ? parts : ['Complete assigned work', 'Review notes'];
+      }
+    }
+    return ['Complete assigned work', 'Review notes'];
+  }
+
+  function flattenObject(obj, prefix = '') {
+    const result = {};
+    if (obj === null || obj === undefined) return result;
+    if (typeof obj !== 'object') { result[prefix] = obj; return result; }
+    Object.entries(obj).forEach(([k, v]) => {
+      const fullKey = prefix ? `${prefix}/${k}` : k;
+      if (v !== null && typeof v === 'object') { Object.assign(result, flattenObject(v, fullKey)); }
+      else { result[fullKey] = v; }
+    });
+    return result;
+  }
+
+  function buildSheetCard(subj, items, isSheet, mode) {
+    const student = currentStudent;
+    let subjDone, total;
+    if (isSheet) {
+      subjDone = items.filter(item => getSheetChecked(student, subj.id, item.row)).length;
+      total = items.length;
+    } else {
+      subjDone = items.filter(({ dayIdx, idx }) => getChecked(student, dayIdx !== undefined ? dayIdx : currentDay, subj.id, idx)).length;
+      total = items.length;
+    }
+    const pct = total ? (subjDone / total * 100) : 0;
+    const isComplete = total > 0 && subjDone === total;
+
+    const card = document.createElement('div');
+    card.className = 'subject-card' + (isComplete ? ' completed' : '');
+    card.innerHTML = `
+      <div class="subject-header" style="${isComplete ? '' : 'background:' + subj.color}">
+        <div class="subject-title">${subj.name}</div>
+        <div class="subject-badge">${isComplete ? '✓' : `${subjDone}/${total}`}</div>
+      </div>
+      <div class="card-prog-track"><div class="card-prog-fill" style="width:${pct}%"></div></div>
+      <div class="card-body">
+        <div class="task-list" id="tasks-${subj.id}"></div>
+        <div class="done-stamp">✓ Complete</div>
+      </div>
+    `;
+
+    const taskList = card.querySelector(`#tasks-${subj.id}`);
+    if (total === 0) {
+      taskList.innerHTML = `<div style="padding:10px 8px;font-size:13px;color:var(--muted);font-family:var(--font-body)">No items for this ${mode === 'weekly' ? 'week' : 'day'}</div>`;
+    } else {
+      items.forEach(item => {
+        const checked = isSheet ? getSheetChecked(student, subj.id, item.row) : getChecked(student, item.dayIdx !== undefined ? item.dayIdx : currentDay, subj.id, item.idx);
+        const el = document.createElement('div');
+        el.className = 'task-item' + (checked ? ' done' : '');
+        const label = isSheet ? `${item.item}${item.type ? ' <span style="font-size:11px;opacity:0.6">('+item.type+')</span>' : ''}` : item.task;
+        el.innerHTML = `
+          <div class="task-check ${checked ? 'checked' : ''}" style="${checked ? 'background:' + subj.color : ''}">
+            <svg width="10" height="8" viewBox="0 0 10 8" fill="none"><path d="M1 4L3.5 6.5L9 1" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="task-label">${label}</div>
+        `;
+        el.onclick = () => {
+          if (isSheet) {
+            const newVal = !getSheetChecked(student, subj.id, item.row);
+            setSheetChecked(student, subj.id, item.row, newVal);
+            markSheetComplete(student, subj.sheetTab, item.row, newVal);
+          } else {
+            const useDayIdx = item.dayIdx !== undefined ? item.dayIdx : currentDay;
+            const newVal = !getChecked(student, useDayIdx, subj.id, item.idx);
+            setCheckedFb(student, useDayIdx, subj.id, item.idx, newVal);
+          }
+          renderStudentView();
+          renderParentView();
+        };
+        taskList.appendChild(el);
+      });
+    }
+    return card;
+  }
+
+  function updateOverallProgress(done, total) {
+    const pct = total ? (done / total * 100) : 0;
+    document.getElementById('overall-fill').style.width = pct + '%';
+    document.getElementById('overall-fill').style.background = 'linear-gradient(90deg, #BF9000, #22C55E)';
+    document.getElementById('overall-count').textContent = `${done} / ${total}`;
+    document.getElementById('celebration').style.display = (done === total && total > 0) ? 'block' : 'none';
+  }
+
+  function renderStudentView() {
+    document.getElementById('week-number-label').textContent = `Week ${getWeekNumber()}`;
+    const isWeekly = isWeeklyPlanner(currentStudent);
+    document.getElementById('day-nav-section').style.display = isWeekly ? 'none' : 'block';
+    document.getElementById('week-label').textContent = isWeekly ? `Week ${getWeekNumber()} — Due by Friday` : '';
+    if (!isWeekly) {
+      document.getElementById('day-title').textContent = DAYS[currentDay];
+      document.getElementById('day-date').textContent = getDayDate(currentDay);
+      document.getElementById('btn-prev').disabled = currentDay === 0;
+      document.getElementById('btn-next').disabled = currentDay === DAYS.length - 1;
+    }
+    buildDayDots();
+    const grid = document.getElementById('subjects-grid');
+    grid.style.gridTemplateColumns = isWeekly ? '1fr' : '1fr 1fr';
+    grid.innerHTML = '<div style="text-align:center;padding:20px;color:var(--muted);font-family:var(--font-body)">Loading...</div>';
+
+    const week = getWeekNumber();
+    const subjects = SUBJECTS[currentStudent];
+    const promises = subjects.map(subj => {
+      if (subj.sheetTab) {
+        return getWeekItemsFromSheet(currentStudent, subj.sheetTab, week).then(items => {
+          if (!isWeekly) {
+            const dayItems = items.filter(item => parseInt(item.day) === currentDay + 1);
+            return { subj, items: dayItems, isSheet: true };
+          }
+          return { subj, items, isSheet: true };
+        });
+      } else {
+        if (isWeekly) {
+          const seen = new Set();
+          const allTasks = [];
+          DAYS.forEach((_, di) => {
+            getTasks(currentStudent, subj.id, di).forEach((t, i) => {
+              if (!seen.has(t)) { seen.add(t); allTasks.push({ task: t, dayIdx: di, idx: i }); }
+            });
+          });
+          return Promise.resolve({ subj, items: allTasks, isSheet: false });
+        } else {
+          const tasks = getTasks(currentStudent, subj.id, currentDay);
+          return Promise.resolve({ subj, items: tasks.map((t, i) => ({ task: t, idx: i })), isSheet: false });
+        }
+      }
+    });
+
+    Promise.all(promises).then(results => {
+      grid.innerHTML = '';
+      let total = 0, done = 0;
+      results.forEach(({ subj, items, isSheet }) => {
+        const mode = isWeekly ? 'weekly' : 'daily';
+        const card = buildSheetCard(subj, items, isSheet, mode);
+        grid.appendChild(card);
+        total += items.length;
+        if (isSheet) done += items.filter(item => getSheetChecked(currentStudent, subj.id, item.row)).length;
+        else done += items.filter(({ dayIdx, idx }) => getChecked(currentStudent, dayIdx !== undefined ? dayIdx : currentDay, subj.id, idx)).length;
+      });
+      updateOverallProgress(done, total);
+    });
+  }
+
+  function buildStudentBtns() {
+    const c = document.getElementById('student-btns');
+    c.innerHTML = '';
+    STUDENTS.forEach(s => {
+      const b = document.createElement('button');
+      b.className = 'student-btn' + (s === currentStudent ? ' active' : '');
+      b.textContent = s;
+      b.onclick = () => { currentStudent = s; buildStudentBtns(); sheetCache = {}; renderStudentView(); };
+      c.appendChild(b);
+    });
+  }
+
+  function buildDayDots() {
+    const c = document.getElementById('day-dots');
+    c.innerHTML = '';
+    if (isWeeklyPlanner(currentStudent)) return;
+    DAYS.forEach((_, i) => {
+      const dot = document.createElement('div');
+      dot.className = 'day-dot' + (i === currentDay ? ' active' : '');
+      dot.onclick = () => { currentDay = i; renderStudentView(); };
+      c.appendChild(dot);
+    });
+  }
+
+  function renderParentView() {
+    const grid = document.getElementById('parent-grid');
+    grid.innerHTML = '';
+    STUDENTS.forEach(student => {
+      const block = document.createElement('div');
+      block.className = 'parent-student-block';
+      const isWeekly = isWeeklyPlanner(student);
+      block.innerHTML = `<div class="parent-student-title">👤 ${student} <span style="font-size:13px;font-weight:600;color:var(--muted)">${isWeekly ? '— Weekly Planner' : '— Daily Schedule'}</span></div>`;
+
+      if (isWeekly) {
+        const section = document.createElement('div');
+        section.className = 'parent-day-section';
+        const bodyId = `pdb-${safeKey(student)}-week`;
+        const week = getWeekNumber();
+        section.innerHTML = `
+          <div class="parent-day-header" onclick="toggleParentDay('${bodyId}')">
+            <div class="parent-day-name">Week ${week} Overview</div>
+            <div class="parent-day-summary" style="color:var(--muted)">Tap to expand</div>
+          </div>
+          <div class="parent-day-body" id="${bodyId}">
+            ${SUBJECTS[student].map(subj => {
+              const cacheKey = `${student}:${subj.sheetTab}:${week}`;
+              const items = subj.sheetTab ? (sheetCache[cacheKey] || []) : [];
+              const sd = subj.sheetTab
+                ? items.filter(item => getSheetChecked(student, subj.id, item.row)).length
+                : DAYS.reduce((acc, _, di) => acc + getTasks(student, subj.id, di).filter((_, i) => getChecked(student, di, subj.id, i)).length, 0);
+              const st = subj.sheetTab ? items.length : DAYS.reduce((acc, _, di) => acc + getTasks(student, subj.id, di).length, 0);
+              const sp = st ? (sd / st * 100) : 0;
+              const allS = st > 0 && sd === st;
+              const noneS = sd === 0;
+              return `<div class="parent-subject-row">
+                <div class="parent-subj-name" style="color:${subj.color}">${subj.name}</div>
+                <div class="parent-prog-track"><div class="parent-prog-fill" style="width:${sp}%;background:${subj.color}"></div></div>
+                <div class="parent-status ${allS?'status-done':noneS?'status-none':'status-partial'}">${allS?'✓ Done':noneS?'Not started':`${sd}/${st}`}</div>
+              </div>`;
+            }).join('')}
+          </div>
+        `;
+        block.appendChild(section);
+      } else {
+        DAYS.forEach((day, di) => {
+          const bodyId = `pdb-${safeKey(student)}-${di}`;
+          const week = getWeekNumber();
+          const section = document.createElement('div');
+          section.className = 'parent-day-section';
+          let total = 0, done = 0;
+          const rows = SUBJECTS[student].map(subj => {
+            const cacheKey = `${student}:${subj.sheetTab}:${week}`;
+            const allItems = subj.sheetTab ? (sheetCache[cacheKey] || []) : [];
+            const dayItems = allItems.filter(item => parseInt(item.day) === di + 1);
+            const sd = subj.sheetTab
+              ? dayItems.filter(item => getSheetChecked(student, subj.id, item.row)).length
+              : getTasks(student, subj.id, di).filter((_, i) => getChecked(student, di, subj.id, i)).length;
+            const st = subj.sheetTab ? dayItems.length : getTasks(student, subj.id, di).length;
+            total += st; done += sd;
+            const sp = st ? (sd / st * 100) : 0;
+            const allS = st > 0 && sd === st;
+            const noneS = sd === 0;
+            return `<div class="parent-subject-row">
+              <div class="parent-subj-name" style="color:${subj.color}">${subj.name}</div>
+              <div class="parent-prog-track"><div class="parent-prog-fill" style="width:${sp}%;background:${subj.color}"></div></div>
+              <div class="parent-status ${allS?'status-done':noneS?'status-none':'status-partial'}">${allS?'✓ Done':noneS?'Not started':`${sd}/${st}`}</div>
+            </div>`;
+          }).join('');
+          const pct = total ? Math.round(done/total*100) : 0;
+          const allDone = done===total && total>0, noneDone = done===0;
+          const statusColor = allDone?'#22C55E':noneDone?'#EF4444':'#F97316';
+          const statusText = allDone?'✓ Complete':noneDone?'Not started':`${pct}% done`;
+          section.innerHTML = `
+            <div class="parent-day-header" onclick="toggleParentDay('${bodyId}')">
+              <div class="parent-day-name">${day} <span style="font-family:var(--font-body);font-size:12px;color:var(--muted);font-weight:400">${getDayDate(di)}</span></div>
+              <div class="parent-day-summary" style="color:${statusColor}">${statusText} — ${done}/${total}</div>
+            </div>
+            <div class="parent-day-body" id="${bodyId}">${rows}</div>
+          `;
+          block.appendChild(section);
+        });
+      }
+      grid.appendChild(block);
+    });
+  }
+
+  function renderAdminSubjects() {
+    const subjects = SUBJECTS[adminGrade];
+    const c = document.getElementById('admin-subjects');
+    c.innerHTML = '';
+    subjects.forEach(subj => {
+      const block = document.createElement('div');
+      block.className = 'admin-subj-block';
+      const bodyId = `adm-${subj.id}`;
+      block.innerHTML = `
+        <div class="admin-subj-header" onclick="toggleAdminSubj('${bodyId}')">
+          <div class="admin-subj-color" style="background:${subj.color}"></div>
+          <div class="admin-subj-name">${subj.name} ${subj.sheetTab ? '<span style="font-size:11px;color:#22C55E;font-weight:700">● Sheet</span>' : ''}</div>
+          <div class="admin-subj-toggle">▾ ${subj.sheetTab ? 'Sheet connected' : 'Edit tasks'}</div>
+        </div>
+        <div class="admin-subj-body" id="${bodyId}">
+          ${subj.sheetTab
+            ? `<div style="padding:8px;font-size:13px;color:var(--muted);font-family:var(--font-body)">This subject pulls assignments from Google Sheets. Edit directly in the Sheet.</div>`
+            : DAYS.map((day, di) => {
+                const tasks = getTasks(adminGrade, subj.id, di);
+                return `<div class="admin-day-row">
+                  <div class="admin-day-label">${day}</div>
+                  <div id="task-inputs-${subj.id}-${di}">
+                    ${tasks.map((t, ti) => `<div class="admin-task-row">
+                      <input class="admin-task-input" type="text" value="${t.replace(/"/g,'&quot;')}" placeholder="Task ${ti+1}" data-subj="${subj.id}" data-day="${di}" data-idx="${ti}">
+                      ${tasks.length > 1 ? `<button class="admin-btn-sm danger" onclick="removeTask('${subj.id}',${di},${ti})">✕</button>` : ''}
+                    </div>`).join('')}
+                  </div>
+                  ${tasks.length < 3 ? `<div class="admin-add-task"><button class="admin-btn-sm" onclick="addTask('${subj.id}',${di})">+ Add task</button></div>` : ''}
+                </div>`;
+              }).join('')
+          }
+        </div>
+      `;
+      c.appendChild(block);
+    });
+  }
+
+  window.toggleParentDay = id => { const b = document.getElementById(id); if (b) b.classList.toggle('open'); };
+  window.toggleAdminSubj = id => { const b = document.getElementById(id); if (b) b.classList.toggle('open'); };
+  window.changeDay = dir => { const n = currentDay + dir; if (n >= 0 && n < DAYS.length) { currentDay = n; renderStudentView(); } };
+
+  window.switchAdminGrade = (grade, btn) => {
+    adminGrade = grade;
+    document.querySelectorAll('.admin-grade-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    renderAdminSubjects();
+  };
+
+  window.addTask = (subjId, dayIdx) => {
+    document.querySelectorAll('.admin-task-input').forEach(inp => {
+      const p = `tasks/${safeKey(adminGrade)}/${safeKey(inp.dataset.subj)}/${inp.dataset.day}`;
+      if (!Array.isArray(appData[p])) appData[p] = getTasks(adminGrade, inp.dataset.subj, parseInt(inp.dataset.day));
+      if (appData[p][parseInt(inp.dataset.idx)] !== undefined) appData[p][parseInt(inp.dataset.idx)] = inp.value;
+    });
+    const path = `tasks/${safeKey(adminGrade)}/${safeKey(subjId)}/${dayIdx}`;
+    const tasks = Array.isArray(appData[path]) ? [...appData[path]] : getTasks(adminGrade, subjId, dayIdx);
+    if (tasks.length >= 3) return;
+    tasks.push('');
+    appData[path] = tasks;
+    renderAdminSubjects();
+    document.getElementById(`adm-${subjId}`).classList.add('open');
+  };
+
+  window.removeTask = (subjId, dayIdx, taskIdx) => {
+    document.querySelectorAll('.admin-task-input').forEach(inp => {
+      const p = `tasks/${safeKey(adminGrade)}/${safeKey(inp.dataset.subj)}/${inp.dataset.day}`;
+      if (!Array.isArray(appData[p])) appData[p] = getTasks(adminGrade, inp.dataset.subj, parseInt(inp.dataset.day));
+      appData[p][parseInt(inp.dataset.idx)] = inp.value;
+    });
+    const path = `tasks/${safeKey(adminGrade)}/${safeKey(subjId)}/${dayIdx}`;
+    const tasks = Array.isArray(appData[path]) ? [...appData[path]] : getTasks(adminGrade, subjId, dayIdx);
+    if (tasks.length <= 1) return;
+    tasks.splice(taskIdx, 1);
+    appData[path] = tasks;
+    db.ref(path).set(tasks.join('||'));
+    renderAdminSubjects();
+    document.getElementById(`adm-${subjId}`).classList.add('open');
+  };
+
+  window.saveAssignments = () => {
+    const savePromises = [];
+    SUBJECTS[adminGrade].forEach(subj => {
+      if (subj.sheetTab) return;
+      DAYS.forEach((_, di) => {
+        const inputs = document.querySelectorAll(`input[data-subj="${subj.id}"][data-day="${di}"]`);
+        const tasks = Array.from(inputs).map(inp => inp.value.trim()).filter(v => v !== '');
+        const path = `tasks/${safeKey(adminGrade)}/${safeKey(subj.id)}/${di}`;
+        appData[path] = tasks;
+        savePromises.push(db.ref(path).set(tasks.join('||')).catch(e => console.error(e)));
+      });
+    });
+    Promise.all(savePromises).then(() => showToast('✓ Assignments saved!')).catch(() => showToast('⚠️ Save failed'));
+    renderStudentView();
+    renderParentView();
+  };
+
+  window.saveWeekNumber = () => {
+    const val = parseInt(document.getElementById('admin-week-input').value);
+    if (val >= 1 && val <= 52) {
+      appData['meta/weekNumber'] = val;
+      currentWeekNumber = val;
+      sheetCache = {};
+      db.ref('meta/weekNumber').set(val);
+      renderStudentView();
+      showToast('✓ Week number saved!');
+    }
+  };
+
+  window.showMainView = (v, tab) => {
+    document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.nav-tab').forEach(el => el.classList.remove('active'));
+    document.getElementById('view-' + v).classList.add('active');
+    tab.classList.add('active');
+    if (v === 'parent') renderParentView();
+    if (v === 'admin') { document.getElementById('admin-week-input').value = getWeekNumber(); renderAdminSubjects(); }
+  };
+
+  window.selectGrade = (grade) => {
+    document.getElementById('view-selector').style.display = 'none';
+    document.getElementById('main-app').style.display = 'block';
+    if (grade === 'parent') {
+      document.getElementById('tab-student').style.display = 'none';
+      document.getElementById('sep-parent').style.display = 'none';
+      showMainView('parent', document.getElementById('tab-parent'));
+    } else {
+      currentStudent = grade;
+      document.getElementById('sep-parent').style.display = 'none';
+      document.getElementById('tab-parent').style.display = 'none';
+      document.getElementById('sep-admin').style.display = 'none';
+      document.getElementById('tab-admin').style.display = 'none';
+      renderStudentView();
+    }
+  };
+
+  window.goBack = () => {
+    ['tab-student','tab-parent','tab-admin','sep-parent','sep-admin'].forEach(id => { document.getElementById(id).style.display = ''; });
+    document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.nav-tab').forEach(el => el.classList.remove('active'));
+    document.getElementById('view-student').classList.add('active');
+    document.getElementById('tab-student').classList.add('active');
+    document.getElementById('main-app').style.display = 'none';
+    document.getElementById('view-selector').style.display = 'flex';
+  };
+
+  window.resetAll = () => {
+    if (!confirm('Reset ALL checkboxes for all students and all days?')) return;
+    db.ref('checks').set(null);
+    db.ref('sheetChecks').set(null);
+    sheetCache = {};
+    renderStudentView();
+    renderParentView();
+  };
+
+  function showToast(msg) {
+    const t = document.getElementById('save-toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2500);
+  }
+
+  db.ref('/').on('value', (snapshot) => {
+    const raw = snapshot.val() || {};
+    appData = flattenObject(raw);
+    currentWeekNumber = appData['meta/weekNumber'] || 29;
+    renderStudentView();
+    renderParentView();
+    const w = document.getElementById('admin-week-input');
+    if (w) w.value = getWeekNumber();
+  });
+
+  document.getElementById('view-selector').style.display = 'flex';
+  document.getElementById('main-app').style.display = 'none';
+  });  // end window.onload
+</script>
+<style>
+:root {
+  --bg: #F4F6FB; --card: #FFFFFF; --text: #1A1D2E; --muted: #8892A4;
+  --border: #E0E4EF; --radius: 16px;
+  --font-head: 'Bree Serif', serif;
+  --font-body: 'Overpass', sans-serif;
+  --complete-grey: #D1D5DB;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font-body); background: var(--bg); color: var(--text); min-height: 100vh; }
+.top-nav { background: #fff; border-bottom: 2px solid var(--border); display: flex; align-items: center; padding: 0 16px; gap: 4px; overflow-x: auto; }
+.nav-tab { padding: 14px 16px; font-family: var(--font-head); font-size: 14px; color: var(--muted); cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -2px; transition: all 0.2s; white-space: nowrap; flex-shrink: 0; }
+.nav-tab:hover { color: var(--text); }
+.nav-tab.active { color: var(--text); border-bottom-color: #BF9000; }
+.nav-sep { width: 1px; height: 24px; background: var(--border); margin: 0 4px; flex-shrink: 0; }
+.view { display: none; padding: 16px; }
+.view.active { display: block; }
+.student-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.student-bar label { font-family: var(--font-head); font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.student-btn { padding: 7px 18px; border-radius: 50px; border: 2px solid var(--border); background: #fff; font-family: var(--font-body); font-weight: 700; font-size: 14px; cursor: pointer; color: var(--muted); transition: all 0.2s; }
+.student-btn.active { background: #1A1D2E; border-color: #1A1D2E; color: #fff; }
+.week-header { text-align: center; margin-bottom: 10px; }
+.week-number { font-family: var(--font-head); font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 2px; }
+.week-label { font-family: var(--font-head); font-size: 15px; color: var(--text); margin-bottom: 8px; min-height: 24px; }
+.day-nav { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.day-arrow { width: 34px; height: 34px; border-radius: 50%; border: 2px solid var(--border); background: #fff; cursor: pointer; font-size: 15px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.2s; color: var(--text); }
+.day-arrow:hover { background: #1A1D2E; color: #fff; border-color: #1A1D2E; }
+.day-arrow:disabled { opacity: 0.3; cursor: default; }
+.day-arrow:disabled:hover { background: #fff; color: var(--text); border-color: var(--border); }
+.day-title { flex: 1; text-align: center; font-family: var(--font-head); font-size: 22px; }
+.day-date { font-family: var(--font-head); font-size: 13px; color: var(--muted); text-align: center; margin-bottom: 10px; }
+.day-dots { display: flex; gap: 6px; justify-content: center; margin-bottom: 14px; }
+.day-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); cursor: pointer; transition: all 0.2s; }
+.day-dot.active { background: #BF9000; transform: scale(1.3); }
+.day-dot.complete { background: #22C55E; }
+.overall-progress { background: #fff; border-radius: var(--radius); padding: 12px 16px; margin-bottom: 14px; display: flex; align-items: center; gap: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+.overall-progress .label { font-family: var(--font-head); font-size: 14px; white-space: nowrap; }
+.prog-track { flex: 1; height: 10px; background: #ECEEF5; border-radius: 50px; overflow: hidden; }
+.prog-fill { height: 100%; border-radius: 50px; transition: width 0.5s cubic-bezier(0.34,1.56,0.64,1); }
+.overall-progress .count { font-weight: 800; font-size: 14px; color: var(--muted); white-space: nowrap; }
+.subjects-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media(max-width:500px){ .subjects-grid { grid-template-columns: 1fr; } }
+.subject-card { background: var(--card); border-radius: var(--radius); overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.05); transition: transform 0.2s, box-shadow 0.3s; }
+.subject-card:hover { transform: translateY(-2px); }
+.subject-card.completed { background: #F0F1F5; box-shadow: 0 1px 4px rgba(0,0,0,0.04); transform: none !important; }
+.subject-header { padding: 11px 14px; display: flex; align-items: center; justify-content: space-between; transition: background 0.3s; }
+.subject-card.completed .subject-header { background: var(--complete-grey) !important; }
+.subject-title { font-family: var(--font-head); font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #fff; line-height: 1.2; flex: 1; }
+.subject-card.completed .subject-title { color: #6B7280; }
+.subject-badge { font-family: var(--font-body); font-size: 11px; font-weight: 800; padding: 3px 9px; border-radius: 50px; background: rgba(255,255,255,0.25); color: #fff; flex-shrink: 0; margin-left: 8px; }
+.subject-card.completed .subject-badge { background: rgba(255,255,255,0.5); color: #6B7280; }
+.card-prog-track { height: 4px; margin: 0; overflow: hidden; }
+.subject-card:not(.completed) .card-prog-track { background: rgba(0,0,0,0.12); }
+.subject-card.completed .card-prog-track { background: #C4C8D0; }
+.card-prog-fill { height: 100%; transition: width 0.5s cubic-bezier(0.34,1.56,0.64,1); }
+.subject-card:not(.completed) .card-prog-fill { background: rgba(255,255,255,0.7); }
+.subject-card.completed .card-prog-fill { background: #9CA3AF; }
+.card-body { background: transparent; }
+.subject-card.completed .card-body { background: #F0F1F5; }
+.task-list { padding: 8px 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+.task-item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 8px; cursor: pointer; transition: background 0.15s; user-select: none; }
+.subject-card:not(.completed) .task-item:hover { background: var(--bg); }
+.subject-card.completed .task-item:hover { background: #E4E6EC; }
+.task-check { width: 18px; height: 18px; border-radius: 4px; border: 2px solid #D0D5E8; flex-shrink: 0; display: flex; align-items: center; justify-content: center; transition: all 0.2s; background: #fff; margin-top: 2px; }
+.task-check.checked { border-color: transparent; }
+.task-check svg { display: none; }
+.task-check.checked svg { display: block; }
+.subject-card.completed .task-check.checked { background: #9CA3AF !important; }
+.task-label { font-size: 13px; font-weight: 600; color: var(--text); transition: all 0.2s; line-height: 1.4; }
+.task-item.done .task-label { text-decoration: line-through; color: var(--muted); }
+.done-stamp { display: none; text-align: center; padding: 4px 0 10px; font-family: var(--font-head); font-size: 13px; color: #9CA3AF; letter-spacing: 0.05em; }
+.subject-card.completed .done-stamp { display: block; }
+.celebration { display: none; text-align: center; padding: 14px; font-family: var(--font-head); font-size: 22px; animation: pop 0.4s cubic-bezier(0.34,1.56,0.64,1); }
+@keyframes pop { from{transform:scale(0.5);opacity:0} to{transform:scale(1);opacity:1} }
+.parent-student-block { margin-bottom: 20px; }
+.parent-student-title { font-family: var(--font-head); font-size: 18px; margin-bottom: 10px; }
+.parent-day-section { background: #fff; border-radius: var(--radius); margin-bottom: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); overflow: hidden; }
+.parent-day-header { padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; border-bottom: 1px solid #F0F2F8; }
+.parent-day-header:hover { background: #FAFBFD; }
+.parent-day-name { font-family: var(--font-head); font-size: 15px; }
+.parent-day-summary { font-family: var(--font-body); font-size: 13px; font-weight: 700; }
+.parent-day-body { padding: 8px 16px 14px; display: none; }
+.parent-day-body.open { display: block; }
+.parent-subject-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid #F5F6FA; }
+.parent-subject-row:last-child { border-bottom: none; }
+.parent-subj-name { font-family: var(--font-body); font-weight: 800; font-size: 12px; width: 110px; flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.04em; }
+.parent-prog-track { flex: 1; height: 8px; background: #ECEEF5; border-radius: 50px; overflow: hidden; }
+.parent-prog-fill { height: 100%; border-radius: 50px; transition: width 0.4s; }
+.parent-status { font-family: var(--font-body); font-size: 12px; font-weight: 700; width: 70px; text-align: right; flex-shrink: 0; }
+.status-done { color: #22C55E; } .status-partial { color: #F97316; } .status-none { color: #EF4444; }
+.admin-section { background: #fff; border-radius: var(--radius); padding: 18px; margin-bottom: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+.admin-section-title { font-family: var(--font-head); font-size: 16px; margin-bottom: 14px; }
+.admin-grade-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+.admin-grade-tab { padding: 7px 16px; border-radius: 50px; border: 2px solid var(--border); background: #fff; font-family: var(--font-body); font-weight: 700; font-size: 13px; cursor: pointer; color: var(--muted); transition: all 0.2s; }
+.admin-grade-tab.active { background: #1A1D2E; border-color: #1A1D2E; color: #fff; }
+.admin-subj-block { border: 1px solid var(--border); border-radius: 12px; margin-bottom: 12px; overflow: hidden; }
+.admin-subj-header { padding: 10px 14px; display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.admin-subj-header:hover { background: #FAFBFD; }
+.admin-subj-color { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+.admin-subj-name { font-family: var(--font-head); font-size: 14px; flex: 1; }
+.admin-subj-toggle { font-size: 12px; color: var(--muted); }
+.admin-subj-body { padding: 12px 14px; border-top: 1px solid var(--border); display: none; }
+.admin-subj-body.open { display: block; }
+.admin-day-row { margin-bottom: 12px; }
+.admin-day-label { font-family: var(--font-head); font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+.admin-task-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.admin-task-input { flex: 1; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; font-family: var(--font-body); font-size: 13px; color: var(--text); background: var(--bg); outline: none; transition: border 0.2s; }
+.admin-task-input:focus { border-color: #BF9000; background: #fff; }
+.admin-task-input::placeholder { color: var(--muted); }
+.admin-btn-sm { padding: 5px 10px; border-radius: 8px; border: 1px solid var(--border); background: #fff; font-family: var(--font-body); font-size: 12px; font-weight: 700; cursor: pointer; color: var(--muted); transition: all 0.2s; white-space: nowrap; }
+.admin-btn-sm:hover { background: var(--bg); color: var(--text); }
+.admin-btn-sm.danger:hover { background: #FFF0F0; color: #EF4444; border-color: #FFD0D0; }
+.admin-add-task { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.admin-save-btn { display: block; width: 100%; padding: 12px; border-radius: 12px; background: #1A1D2E; border: none; font-family: var(--font-head); font-size: 15px; color: #fff; cursor: pointer; transition: all 0.2s; margin-top: 4px; }
+.admin-save-btn:hover { background: #2d3350; }
+.admin-week-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.admin-week-row label { font-family: var(--font-head); font-size: 14px; }
+.admin-week-input { width: 70px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; font-family: var(--font-body); font-size: 14px; font-weight: 700; color: var(--text); background: var(--bg); outline: none; }
+.admin-week-input:focus { border-color: #BF9000; background: #fff; }
+.reset-btn { display: block; margin: 16px auto 0; padding: 10px 24px; background: #ECEEF5; border: none; border-radius: 50px; font-family: var(--font-body); font-weight: 700; font-size: 14px; color: var(--muted); cursor: pointer; transition: all 0.2s; }
+.reset-btn:hover { background: #E0E4EF; color: var(--text); }
+.save-toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1A1D2E; color: #fff; padding: 10px 22px; border-radius: 50px; font-family: var(--font-body); font-weight: 700; font-size: 14px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 999; }
+.save-toast.show { opacity: 1; }
+.back-btn { background: none; border: none; font-family: var(--font-body); font-size: 13px; font-weight: 700; color: var(--muted); cursor: pointer; padding: 6px 12px; border-radius: 8px; transition: all 0.2s; }
+.back-btn:hover { background: var(--border); color: var(--text); }
+.selector-screen { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--bg); padding: 30px 20px; gap: 24px; }
+.selector-title { font-family: var(--font-head); font-size: 28px; color: var(--text); text-align: center; }
+.selector-subtitle { font-family: var(--font-body); font-size: 15px; color: var(--muted); text-align: center; margin-top: -14px; }
+.selector-btns { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 340px; }
+.selector-btn { padding: 18px 22px; border-radius: 16px; border: none; cursor: pointer; font-family: var(--font-head); font-size: 19px; color: #fff; transition: transform 0.15s, box-shadow 0.15s; box-shadow: 0 4px 16px rgba(0,0,0,0.12); text-align: left; }
+.selector-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.18); }
+.selector-btn small { display: block; font-family: var(--font-body); font-size: 12px; font-weight: 600; opacity: 0.85; margin-top: 4px; }
+.selector-btn-parent { padding: 13px 22px; border-radius: 16px; border: 2px solid var(--border); background: #fff; cursor: pointer; font-family: var(--font-head); font-size: 15px; color: var(--muted); transition: all 0.15s; width: 100%; max-width: 340px; }
+.selector-btn-parent:hover { border-color: #1A1D2E; color: var(--text); }
+</style>
+</head>
+<body>
+
+<div id="view-selector" class="selector-screen">
+  <div class="selector-title">Welcome!</div>
+  <div class="selector-subtitle">Who's checking in today?</div>
+  <div class="selector-btns">
+    <button class="selector-btn" style="background:#603391" onclick="selectGrade('8th Grade')">
+      8th Grade
+      <small>Bible · Literature 8 · Vocab · Grammar · Earth Science · American Republic · Pre-Algebra</small>
+    </button>
+    <button class="selector-btn" style="background:#CC0066" onclick="selectGrade('10th Grade')">
+      10th Grade — Weekly Planner
+      <small>Bible · English 10 · Physical Science · World History · Geometry · Spanish · Guitar</small>
+    </button>
+  </div>
+  <button class="selector-btn-parent" onclick="selectGrade('parent')">👩‍💼 Parent / Admin View</button>
+</div>
+
+<div id="main-app" style="display:none">
+<div class="top-nav">
+  <div class="nav-tab active" id="tab-student" onclick="showMainView('student',this)">📚 Student</div>
+  <div class="nav-sep" id="sep-parent"></div>
+  <div class="nav-tab" id="tab-parent" onclick="showMainView('parent',this)">👩‍💼 Parent</div>
+  <div class="nav-sep" id="sep-admin"></div>
+  <div class="nav-tab" id="tab-admin" onclick="showMainView('admin',this)">⚙️ Admin</div>
+  <div style="flex:1"></div>
+  <button class="back-btn" onclick="goBack()">← Switch</button>
+</div>
+
+<div id="view-student" class="view active">
+  <div class="week-header">
+    <div class="week-number" id="week-number-label">Week 29</div>
+    <div class="week-label" id="week-label"></div>
+    <div id="day-nav-section">
+      <div class="day-nav">
+        <button class="day-arrow" id="btn-prev" onclick="changeDay(-1)">&#8592;</button>
+        <div class="day-title" id="day-title">Monday</div>
+        <button class="day-arrow" id="btn-next" onclick="changeDay(1)">&#8594;</button>
+      </div>
+      <div class="day-date" id="day-date"></div>
+    </div>
+  </div>
+  <div class="day-dots" id="day-dots"></div>
+  <div class="overall-progress">
+    <span class="label">Progress</span>
+    <div class="prog-track"><div class="prog-fill" id="overall-fill" style="width:0%"></div></div>
+    <span class="count" id="overall-count">0 / 0</span>
+  </div>
+  <div class="subjects-grid" id="subjects-grid"></div>
+  <div class="celebration" id="celebration">🎉 All done! Great work! 🎉</div>
+</div>
+
+<div id="view-parent" class="view">
+  <div id="parent-grid"></div>
+  <button class="reset-btn" onclick="resetAll()">Reset All Checkboxes</button>
+</div>
+
+<div id="view-admin" class="view">
+  <div class="admin-section">
+    <div class="admin-section-title">📅 Week Number</div>
+    <div class="admin-week-row">
+      <label>Current Week:</label>
+      <input type="number" class="admin-week-input" id="admin-week-input" min="1" max="52" value="29">
+      <button class="admin-btn-sm" onclick="saveWeekNumber()">Save</button>
+    </div>
+  </div>
+  <div class="admin-section">
+    <div class="admin-section-title">📝 Edit Assignments</div>
+    <div class="admin-grade-tabs">
+      <button class="admin-grade-tab active" onclick="switchAdminGrade('8th Grade', this)">8th Grade</button>
+      <button class="admin-grade-tab" onclick="switchAdminGrade('10th Grade', this)">10th Grade</button>
+    </div>
+    <div id="admin-subjects"></div>
+    <button class="admin-save-btn" onclick="saveAssignments()">💾 Save All Assignments</button>
+  </div>
+</div>
+</div>
+
+<div class="save-toast" id="save-toast"></div>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+</body>
+</html>
